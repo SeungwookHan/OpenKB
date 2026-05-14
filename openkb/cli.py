@@ -255,7 +255,12 @@ def use(path):
 
 
 @cli.command()
-def init():
+@click.option(
+    "--language", "-l", "language",
+    default=None, metavar="LANG",
+    help="Wiki output language (e.g. 'en', 'ko'). Skips the interactive prompt when set.",
+)
+def init(language):
     """Initialise a new knowledge base in the current directory."""
     openkb_dir = Path(".openkb")
     if openkb_dir.exists():
@@ -280,6 +285,12 @@ def init():
         hide_input=True,
         show_default=False,
     ).strip()
+    if language is None:
+        language = click.prompt(
+            f"Wiki language (enter for default {DEFAULT_CONFIG['language']})",
+            default=DEFAULT_CONFIG["language"],
+            show_default=False,
+        )
     # Create directory structure
     Path("raw").mkdir(exist_ok=True)
     Path("wiki/sources/images").mkdir(parents=True, exist_ok=True)
@@ -298,7 +309,7 @@ def init():
     openkb_dir.mkdir()
     config = {
         "model": model,
-        "language": DEFAULT_CONFIG["language"],
+        "language": language,
         "pageindex_threshold": DEFAULT_CONFIG["pageindex_threshold"],
     }
     save_config(openkb_dir / "config.yaml", config)

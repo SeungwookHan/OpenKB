@@ -551,24 +551,64 @@ def test_cli_remove_prunes_legacy_registry_entry_without_doc_name(kb_dir):
     assert not (kb_dir / "raw" / "ollama.md").exists()
 
 
-def test_cli_remove_lint_cleans_dangling_links(kb_dir):
-    """`openkb remove` must auto-run lint --fix so wikilinks pointing at
-    the deleted summary/concept get stripped from sibling pages.
+def test_cli_remove_lint_cleans_dangling_links_in_modified_page(kb_dir):
+    """`openkb remove` must auto-run a scoped lint --fix so wikilinks
+    pointing at the just-deleted summary get stripped from concept
+    pages that this removal modified.
+
+    Scope (issue #58 / Bug 2): only files in ``concept_result["modified"]``
+    plus ``index.md`` — see ``test_cli_remove_preserves_ghosts_in_unrelated_pages``
+    for the complementary contract.
     """
     _seed_two_doc_kb(kb_dir)
-    # Plant a stray reference to the about-to-be-deleted summary inside
-    # the surviving concept's body (not in any structured section).
-    llm_path = kb_dir / "wiki" / "concepts" / "llm.md"
-    llm_path.write_text(
-        llm_path.read_text() + "\nSee also [[summaries/attention-h_a]] for background.\n",
+    # Plant a stray free-text reference in the body of the MULTI-source
+    # concept page — `concepts/attention.md` has both attention-h_a and
+    # llm-h_l as sources, so the remove flow modifies it (drops
+    # attention-h_a from the frontmatter). The lint pass should also
+    # strip the dangling free-text link.
+    attn_path = kb_dir / "wiki" / "concepts" / "attention.md"
+    attn_path.write_text(
+        attn_path.read_text() + "\nSee also [[summaries/attention-h_a]] for background.\n",
         encoding="utf-8",
     )
 
     result = _invoke(kb_dir, ["remove", "attention.pdf", "--yes"])
 
     assert result.exit_code == 0, result.output
-    cleaned = llm_path.read_text()
+    cleaned = attn_path.read_text()
     assert "[[summaries/attention-h_a]]" not in cleaned
+
+
+def test_cli_remove_preserves_ghosts_in_unrelated_pages(kb_dir):
+    """Issue #58 / Bug 2 regression: `openkb remove` must NOT strip
+    pre-existing dangling wikilinks from concept pages that don't have
+    the removed doc in their frontmatter sources.
+
+    Before the fix, ``fix_broken_links(wiki_dir)`` swept the whole wiki
+    on every remove, producing 39-file / 1254-line diffs and silently
+    deleting links the user had hand-written to not-yet-added concepts.
+    """
+    _seed_two_doc_kb(kb_dir)
+    # llm.md's frontmatter sources include only ``summaries/llm-h_l`` —
+    # the removal of ``attention.pdf`` does NOT touch its sources list,
+    # so it is out of scope for the post-remove lint pass.
+    llm_path = kb_dir / "wiki" / "concepts" / "llm.md"
+    original = llm_path.read_text() + (
+        "\nFollow-up: [[concepts/agent-loops]] (concept I'll add next week).\n"
+        "Also a hand-added back-ref [[summaries/attention-h_a]] users may want.\n"
+    )
+    llm_path.write_text(original, encoding="utf-8")
+
+    result = _invoke(kb_dir, ["remove", "attention.pdf", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    surviving = llm_path.read_text()
+    # Pre-existing ghost to a not-yet-added concept survives.
+    assert "[[concepts/agent-loops]]" in surviving
+    # And a hand-added link to the just-deleted summary also survives
+    # because llm.md is OUT OF SCOPE for this removal's cleanup. Users
+    # who want a wiki-wide sweep can run `openkb lint --fix` explicitly.
+    assert "[[summaries/attention-h_a]]" in surviving
 
 
 # ---------------------------------------------------------------------------

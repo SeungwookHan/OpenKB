@@ -222,6 +222,34 @@ def test_hash_registry_remove_by_doc_name(tmp_path):
     assert list(saved.keys()) == ["h2"]
 
 
+def test_hash_registry_remove_by_hash(tmp_path):
+    """Issue #58 / Bug 1: `remove_by_hash` is the hash-keyed sibling of
+    `remove_by_doc_name`. It exists so callers that already have the
+    file_hash in hand (e.g. the CLI after `_resolve_doc_identifier`)
+    don't need to round-trip through the `doc_name` slug — that round
+    trip is what silently no-ops for legacy registry entries lacking a
+    `doc_name` key (ingested before commit c504e26).
+    """
+    path = tmp_path / "hashes.json"
+    path.write_text(json.dumps({
+        "h_modern": {"name": "a.pdf", "doc_name": "a-h_modern", "type": "short"},
+        "h_legacy": {"name": "b.pdf", "type": "short"},  # no doc_name
+    }))
+
+    reg = HashRegistry(path)
+
+    # Modern entry: removable by hash.
+    assert reg.remove_by_hash("h_modern") is True
+    assert reg.remove_by_hash("h_modern") is False  # idempotent
+    # Legacy entry (no doc_name): removable by hash too — that's the point.
+    assert reg.remove_by_hash("h_legacy") is True
+    # Unknown hash: returns False, doesn't raise.
+    assert reg.remove_by_hash("never-existed") is False
+
+    assert reg.all_entries() == {}
+    assert json.loads(path.read_text()) == {}
+
+
 # ---------------------------------------------------------------------------
 # _resolve_doc_identifier
 # ---------------------------------------------------------------------------
@@ -457,6 +485,70 @@ def test_cli_remove_confirm_no_aborts(kb_dir):
     assert result.exit_code == 0
     assert "Aborted" in result.output
     assert (kb_dir / "wiki" / "summaries" / "attention-h_a.md").exists()
+
+
+def _seed_legacy_kb(kb_dir: Path) -> None:
+    """Seed a KB whose registry entry pre-dates PR #51.
+
+    Layout reflects the issue #58 / Bug 1 repro: ``hashes.json`` only
+    has ``{name, type}`` (no ``doc_name`` key), and the wiki paths use
+    the bare stem of the original filename — which is also what
+    ``cli.py``'s ``Path(name).stem`` fallback produces on the read path.
+    """
+    (kb_dir / ".openkb" / "hashes.json").write_text(json.dumps({
+        "h_legacy": {"name": "ollama.md", "type": "md"},
+        "h_keep": {"name": "other.md", "type": "md"},  # untouched bystander
+    }))
+    (kb_dir / "raw" / "ollama.md").write_text("# Ollama\n", encoding="utf-8")
+    (kb_dir / "raw" / "other.md").write_text("# Other\n", encoding="utf-8")
+
+    (kb_dir / "wiki" / "summaries" / "ollama.md").write_text(
+        "---\nsources: [raw/ollama.md]\nbrief: x\n---\n# Ollama\n",
+        encoding="utf-8",
+    )
+    (kb_dir / "wiki" / "summaries" / "other.md").write_text(
+        "---\nsources: [raw/other.md]\nbrief: y\n---\n# Other\n",
+        encoding="utf-8",
+    )
+    (kb_dir / "wiki" / "index.md").write_text(
+        "# Knowledge Base Index\n\n## Documents\n"
+        "- [[summaries/ollama]] (md) - Ollama notes\n"
+        "- [[summaries/other]] (md) - Other notes\n\n"
+        "## Concepts\n\n## Explorations\n",
+        encoding="utf-8",
+    )
+    (kb_dir / "wiki" / "log.md").write_text("# Log\n", encoding="utf-8")
+
+
+def test_cli_remove_prunes_legacy_registry_entry_without_doc_name(kb_dir):
+    """Issue #58 / Bug 1 regression: a registry entry written before
+    PR #51 has only ``{name, type}``. The earlier remove path called
+    ``remove_by_doc_name(meta.get('doc_name') or Path(name).stem)``,
+    which silently no-op'd because ``meta.get('doc_name')`` is None for
+    every legacy row — leaving an orphan hash entry that then re-bound
+    the next ``openkb add`` of the same file via SHA dedup.
+
+    Fix: the CLI now prunes the registry by the already-resolved
+    ``file_hash`` (returned by ``_resolve_doc_identifier``), so the
+    metadata shape doesn't matter.
+    """
+    _seed_legacy_kb(kb_dir)
+    hashes_path = kb_dir / ".openkb" / "hashes.json"
+
+    result = _invoke(kb_dir, ["remove", "ollama.md", "--yes"])
+
+    assert result.exit_code == 0, result.output
+
+    remaining = json.loads(hashes_path.read_text())
+    assert "h_legacy" not in remaining, (
+        "legacy registry entry survived remove — see issue #58 Bug 1"
+    )
+    # Sibling legacy entry is untouched.
+    assert "h_keep" in remaining
+
+    # Wiki side-effects of the remove still happened (sanity).
+    assert not (kb_dir / "wiki" / "summaries" / "ollama.md").exists()
+    assert not (kb_dir / "raw" / "ollama.md").exists()
 
 
 def test_cli_remove_lint_cleans_dangling_links(kb_dir):

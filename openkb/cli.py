@@ -839,7 +839,10 @@ def remove(ctx, identifier, keep_raw, keep_empty_concepts, dry_run, yes):
             return
 
     # ----- Commit point -----
-    registry.remove_by_doc_name(doc_name)
+    # Prune by hash, not by ``doc_name``: legacy registry entries
+    # (ingested before commit c504e26) carry only ``{name, type}`` and
+    # would silently no-op under ``remove_by_doc_name``. See issue #58.
+    registry.remove_by_hash(file_hash)
 
     if raw_path is not None:
         raw_path.unlink(missing_ok=True)
